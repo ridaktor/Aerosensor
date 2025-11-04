@@ -1,0 +1,27 @@
+.DS_Store
+# still at heredoc> …
+# paste these lines:
+# macOS
+.DS_Store
+
+# Arduino / ESP32 build outputs
+build/
+*.tmp
+*.log
+*.elf
+*.bin
+*.hex
+
+# IDE caches / project files
+.pio/
+.vscode/
+.idea/
+.cmake/
+CMakeFiles/
+CMakeCache.txt
+
+# Node (if you experiment with a separate UI later)
+node_modules/
+
+# Logs / CSVs (remove if you want them tracked)
+*.csv
