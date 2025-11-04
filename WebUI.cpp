@@ -14,6 +14,7 @@
 #include <SPIFFS.h>
 #include <math.h>
 #include <ESP.h>
+#include <stdlib.h>
 
 #include "SensorMS5525.h"   // doZero(...)
 #include "EnvSensor.h"      // env* globals
@@ -83,21 +84,34 @@ input,select{background:#0b1020;color:#fff;border:1px solid #223;padding:6px 8px
 </body></html>)HTML";
 
 // JS from PROGMEM
+// in WebUI.cpp, replace APP_JS string with this:
 static const char APP_JS[] PROGMEM = R"JS(
 const fmt = v=> (Math.round(v*100)/100).toFixed(2);
 let logging=false, curFile="";
 const live = {t:[], dp:[], va:[], tc:[]};
 
+// Charts
 const baseOpts = {animation:false, maintainAspectRatio:false,
   plugins:{legend:{display:true}}, scales:{x:{type:'time'}, y:{beginAtZero:false}}};
 const ch1 = new Chart(document.getElementById('c1'), {type:'line',
-  data:{labels:live.t, datasets:[{label:'ΔP (Pa)', data:live.dp, pointRadius:0},
-                                 {label:'V (m/s)', data:live.va, pointRadius:0, yAxisID:'y1'}]},
+  data:{labels:live.t, datasets:[
+    {label:'ΔP (Pa)', data:live.dp, pointRadius:0},
+    {label:'V (m/s)', data:live.va, pointRadius:0, yAxisID:'y1'}
+  ]},
   options:{...baseOpts, scales:{x:{type:'time'}, y:{position:'left'}, y1:{position:'right'}}}});
 const ch2 = new Chart(document.getElementById('c2'), {type:'line',
   data:{labels:live.t, datasets:[{label:'Temp (°C)', data:live.tc, pointRadius:0}]}, options:baseOpts});
 
 function setState(s){ document.getElementById('state').textContent = s; }
+
+async function syncTime(){
+  try{
+    const epoch_ms = Date.now();                 // browser wall time
+    const tz_min   = new Date().getTimezoneOffset(); // minutes west of UTC (e.g. Türkiye = -180)
+    await fetch('/api/time',{method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({epoch_ms, tz_min})});
+  }catch(e){ console.warn('time sync failed', e); }
+}
 
 async function loadSettings(){
   const r = await fetch('/api/settings'); const s = await r.json();
@@ -105,7 +119,6 @@ async function loadSettings(){
   document.getElementById('logms').value   = s.logms;
 }
 
-// Show name + size if available
 async function refreshFiles(){
   const r = await fetch('/api/files'); const j = await r.json();
   const sel = document.getElementById('files'); sel.innerHTML='';
@@ -120,12 +133,14 @@ async function poll(){
   try{
     const r = await fetch('/api/sample'); if(!r.ok) throw 0;
     const j = await r.json();
+
     logging = !!j.logging; curFile = j.curFile || "";
     document.getElementById('btnLog').textContent = logging? 'Stop logging' : 'Start logging';
     document.getElementById('btnDl').disabled = !curFile;
 
     setState(`ΔP=${fmt(j.dp)} Pa, V=${fmt(j.va)} m/s, T=${fmt(j.tc)} °C${logging? ' — logging → '+curFile:''}`);
 
+    // env
     if (typeof j.rho === 'number' && typeof j.ap === 'number' && typeof j.at === 'number') {
       const env = document.getElementById('env');
       const hpa = (j.ap/100).toFixed(1);
@@ -133,7 +148,8 @@ async function poll(){
       env.textContent = `ρ=${j.rho.toFixed(3)} kg/m³, P=${hpa} hPa, T=${j.at.toFixed(1)} °C${rh}`;
     }
 
-    const t = new Date(j.t);
+    // Use real timestamp `ts` (epoch ms from device)
+    const t = new Date(j.ts || j.t); // fallback to t if ts absent
     const sm = document.getElementById('smooth').checked;
     live.t.push(t); live.dp.push(sm? j.dp_s : j.dp); live.va.push(j.va); live.tc.push(sm? j.tc_s : j.tc);
     if (live.t.length>1200){ live.t.shift(); live.dp.shift(); live.va.shift(); live.tc.shift(); }
@@ -142,7 +158,7 @@ async function poll(){
   setTimeout(poll, 200);
 }
 
-// SAVE → send + confirm
+// SAVE
 document.getElementById('btnSave').onclick = async ()=>{
   try{
     const invert = document.getElementById('invert').checked;
@@ -170,7 +186,7 @@ document.getElementById('btnZero').onclick = async ()=>{
   } catch(e) {
     console.error(e);
     setState('zero failed');
-    alert('Zero failed ❌\nTry again when the sensor is still and both ports are open.');
+    alert('Zero failed ❌');
   } finally {
     btn.disabled = false;
   }
@@ -218,7 +234,8 @@ document.getElementById('btnGet').onclick  = ()=>{
   if(f) location.href='/download?file='+encodeURIComponent(f);
 };
 
-loadSettings(); refreshFiles(); poll();
+// Kickoff
+(async()=>{ await syncTime(); await loadSettings(); await refreshFiles(); poll(); })();
 )JS";
 
 // ------------------- Endpoints -------------------
@@ -229,43 +246,21 @@ void setupHTTP(WebServer& server, void (*saveSettingsCb)()) {
   server.on("/", HTTP_GET, [&](){ server.send_P(200, "text/html", INDEX_HTML); });
   server.on("/app.js", HTTP_GET, [&](){ server.send_P(200, "application/javascript", APP_JS); });
 
-  // Live sample JSON
-  server.on("/api/sample", HTTP_GET, [&](){
-    Sample s; s.t_ms=lastS.t_ms; s.dp_Pa=lastS.dp_Pa; s.temp_C=lastS.temp_C; s.Va_mps=lastS.Va_mps;
-    String cur = currentLogName();
-    String j = "{";
-    j += "\"t\":" + String((unsigned long)s.t_ms) + ",";
-    j += "\"dp\":" + String(s.dp_Pa, 4) + ",";
-    j += "\"tc\":" + String(s.temp_C, 3) + ",";
-    j += "\"va\":" + String(s.Va_mps, 4) + ",";
-    j += "\"rho\":" + String(rho, 4) + ",";
-    j += "\"ap\":"  + String(isnan(envP_Pa)?0:envP_Pa, 1) + ",";
-    j += "\"at\":"  + String(isnan(envT_C)?0:envT_C, 2) + ",";
-    j += "\"ah\":"  + String(isnan(envRH)?0:envRH, 1) + ",";
-    j += "\"hasH\":" + String(envHasHum ? "true" : "false") + ",";
-    j += "\"gated\":" + String(g_showSpeed ? "false" : "true") + ",";
-    static float adp=0, atc=0; static int n=0; n = min(10, n+1);
-    adp += (s.dp_Pa - adp)/n; atc += (s.temp_C - atc)/n;
-    j += "\"dp_s\":" + String(adp, 4) + ",";
-    j += "\"tc_s\":" + String(atc, 4) + ",";
-    j += "\"logging\":" + String(loggingOn ? "true" : "false") + ",";
-    j += "\"curFile\":\"" + cur + "\"}";
-    server.send(200, "application/json", j);
-  });
+
 
   // Zero (works with doZero(ms) that returns void)
-  server.on("/api/zero", HTTP_POST, [&](){
-    stopLogging();
-    doZero(2000);                   // your current signature
-    if (saveSettingsFn) saveSettingsFn();
-
-    String j = "{";
-    j += "\"ok\":true,";
-    j += "\"dp_zero\":" + String(dp_zero, 4) + ",";
-    j += "\"samples\":0";           // unknown without changing doZero signature
-    j += "}";
-    server.send(200, "application/json", j);
-  });
+server.on("/api/zero", HTTP_POST, [&](){
+  stopLogging();
+  uint16_t n=0;
+  bool ok = doZero(2000, &n);
+  if (saveSettingsFn) saveSettingsFn();
+  String j = "{";
+  j += "\"ok\":" + String(ok ? "true" : "false") + ",";
+  j += "\"dp_zero\":" + String(dp_zero, 4) + ",";
+  j += "\"samples\":" + String((unsigned)n);
+  j += "}";
+  server.send(200, "application/json", j);
+});
 
   // Logging control
   server.on("/api/log", HTTP_POST, [&](){
@@ -295,25 +290,98 @@ void setupHTTP(WebServer& server, void (*saveSettingsCb)()) {
 
   // Files & download
   server.on("/api/files", HTTP_GET, [&](){ listFilesJSON(server); });
+  // Receive browser wall time and compute offset
+server.on("/api/time", HTTP_POST, [&](){
+  long long epoch_ms = 0;
+  int tz_min = 0;
+  if (server.hasArg("plain")) {
+    String body = server.arg("plain");
+    int i, c;
 
-  server.on("/download", HTTP_GET, [&](){
-    String fn = server.hasArg("file") ? server.arg("file") : String("");
-    if (fn.length() && fn.charAt(0) != '/') fn = "/" + fn;
-
-    // If downloading the current file, pause logging to avoid contention
-    if (fn == currentLogName()) {
-      stopLogging();     // simplest + safest
-      delay(50);         // give FS a breath
+    if ((i = body.indexOf("\"epoch_ms\"")) != -1) {
+      c = body.indexOf(':', i);
+      // parse as 64-bit
+      String v = body.substring(c+1);
+      v.trim();
+      epoch_ms = atoll(v.c_str());
     }
+    if ((i = body.indexOf("\"tz_min\"")) != -1) {
+      c = body.indexOf(':', i);
+      tz_min = body.substring(c+1).toInt();
+    }
+  }
+  if (epoch_ms > 0) {
+    g_timeOffsetMs = epoch_ms - (long long)millis();
+    g_tzOffsetMin  = tz_min;
+    server.send(200, "application/json",
+      String("{\"ok\":true,\"offset_ms\":") + g_timeOffsetMs + ",\"tz_min\":" + g_tzOffsetMin + "}");
+  } else {
+    server.send(400, "application/json", "{\"ok\":false}");
+  }
+});
 
-    if (fn.length()==0 || !SPIFFS.exists(fn)) { server.send(404, "text/plain", "no such file"); return; }
+// Live sample JSON — add ts (epoch ms)
+server.on("/api/sample", HTTP_GET, [&](){
+  Sample s; s.t_ms=lastS.t_ms; s.dp_Pa=lastS.dp_Pa; s.temp_C=lastS.temp_C; s.Va_mps=lastS.Va_mps;
+  String cur = currentLogName();
+  unsigned long t_ms = (unsigned long)s.t_ms;
+  unsigned long long ts = (unsigned long long)g_timeOffsetMs + (unsigned long long)t_ms;
 
-    File f = SPIFFS.open(fn, FILE_READ);
+  String j = "{";
+  j += "\"t\":"   + String(t_ms) + ",";                    // legacy ms
+  j += "\"ts\":"  + String((unsigned long long)ts) + ",";
+  j += "\"dp\":"  + String(s.dp_Pa, 4) + ",";
+  j += "\"tc\":"  + String(s.temp_C, 3) + ",";
+  j += "\"va\":"  + String(s.Va_mps, 4) + ",";
+  j += "\"rho\":" + String(rho, 4) + ",";
+  j += "\"ap\":"  + String(isnan(envP_Pa)?0:envP_Pa, 1) + ",";
+  j += "\"at\":"  + String(isnan(envT_C)?0:envT_C, 2) + ",";
+  j += "\"ah\":"  + String(isnan(envRH)?0:envRH, 1) + ",";
+  j += "\"hasH\":"+ String(envHasHum ? "true" : "false") + ",";
+  // smoothing
+  static float adp=0, atc=0; static int n=0; n = min(10, n+1);
+  adp += (s.dp_Pa - adp)/n; atc += (s.temp_C - atc)/n;
+  j += "\"dp_s\":" + String(adp, 4) + ",";
+  j += "\"tc_s\":" + String(atc, 4) + ",";
+  j += "\"logging\":" + String(loggingOn ? "true" : "false") + ",";
+  j += "\"curFile\":\"" + cur + "\"}";
+  server.send(200, "application/json", j);
+});
+
+  // Files & download (no stopLogging)
+// Files & download (no stopLogging)
+server.on("/download", HTTP_GET, [&](){
+  String fn = server.hasArg("file") ? server.arg("file") : String("");
+  if (fn.length() && fn.charAt(0) != '/') fn = "/" + fn;
+  if (fn.length()==0 || !SPIFFS.exists(fn)) { server.send(404, "text/plain", "no such file"); return; }
+
+  // try direct read while logging (no stopLogging)
+  File f = SPIFFS.open(fn, FILE_READ);
+  if (!f) {
+    // fallback: snapshot copy if concurrent open fails
+    String snap = "/_snap.csv";
+    if (SPIFFS.exists(snap)) SPIFFS.remove(snap);
+
+    File src = SPIFFS.open(fn, FILE_READ);
+    File dst = SPIFFS.open(snap, FILE_WRITE);
+    if (src && dst) {
+      uint8_t buf[1024];
+      int n;
+      while ((n = src.read(buf, sizeof(buf))) > 0) dst.write(buf, n);
+      src.close(); dst.close();
+      f = SPIFFS.open(snap, FILE_READ);
+    }
     if (!f) { server.send(500, "text/plain", "open failed"); return; }
+  }
 
-    server.streamFile(f, "text/csv");
-    f.close();
-  });
+  // Suggest a file name to the browser (strip leading '/')
+  server.sendHeader("Content-Disposition",
+                  "attachment; filename=\"" + fn.substring(1) + "\"");
+
+  // streamFile will set Content-Type and Content-Length automatically
+  server.streamFile(f, "text/csv");
+  f.close();
+});
 
   // Delete selected file (any file)
   server.on("/api/delete", HTTP_POST, [&](){

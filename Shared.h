@@ -3,9 +3,21 @@
 #include <Preferences.h>
 
 class WebServer;
+
+// Single forward declaration is enough:
 void setupHTTP(WebServer& server, void (*saveSettings)());
 
-struct Sample { uint32_t t_ms; float dp_Pa, temp_C, Va_mps; };
+struct Sample {
+  uint32_t t_ms;
+  float    dp_Pa;
+  float    temp_C;     // env temperature preferred (kept for UI)
+  float    Va_mps;
+  // Extra channels for 1 Hz logging
+  float    tempP_C;    // pressure-sensor temperature (MS5525)
+  float    tempEnv_C;  // environment sensor temperature (BME/BMP)
+  float    absP_Pa;    // environment absolute pressure (Pa)
+  float    RH_pct;     // environment relative humidity (% or 0 if N/A)
+};
 
 // Globals (defined in .ino)
 extern Preferences prefs;
@@ -17,13 +29,13 @@ extern uint32_t logEveryMs;
 extern uint32_t bootCounter;
 extern bool     loggingOn;
 
-extern bool     autoRho;     // always compute ρ from env sensor
-extern float    envP_Pa;     // Pa
-extern float    envT_C;      // °C
-extern float    envRH;       // %
-extern bool     envHasHum;   // BME280=true, BMP280=false
+extern bool     autoRho;
+extern float    envP_Pa;
+extern float    envT_C;
+extern float    envRH;
+extern bool     envHasHum;
 
-extern bool     g_showSpeed; // UI/log gating flag (true = show)
+extern bool     g_showSpeed;
 
-// Settings persistence hook from .ino
-void setupHTTP(class WebServer& server, void (*saveSettings)());
+extern long long g_timeOffsetMs; // epoch_ms - millis()
+extern int       g_tzOffsetMin;  // minutes west of UTC
